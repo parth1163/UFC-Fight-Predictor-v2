@@ -1,6 +1,6 @@
 # Author: Parth Patel
 # Project: UFC Fight Predictor
-# Description: Scrapes live fighter stats from ufcstats.com to predict fight outcomes.
+# Description: Scrapes live fighter stats and opponent history from ufcstats.com to predict fight outcomes.
 #
 # ----- WARNING: This script relies on web scraping and may break
 # ----- if ufcstats.com changes its HTML structure.
@@ -85,10 +85,11 @@ def get_fighter_profile_url(fighter_name):
 
 def get_stats_from_profile(profile_url, fighter_name):
     """
-    Scrapes the individual stats from a fighter's profile page.
+    Scrapes the individual stats AND fight history from a fighter's profile page.
     """
     if profile_url is None:
-        return {'Name': fighter_name, 'Wins': 0, 'Losses': 0, 'Draws': 0, 'SLpM': 0.0, 'Str_Def': 0}
+        # Return empty stats and empty history
+        return {'Name': fighter_name, 'Wins': 0, 'Losses': 0, 'Draws': 0, 'SLpM': 0.0, 'Str_Def': 0}, []
 
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'}
@@ -96,9 +97,11 @@ def get_stats_from_profile(profile_url, fighter_name):
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         print(f"Error fetching profile: {e}")
-        return {'Name': fighter_name, 'Wins': 0, 'Losses': 0, 'Draws': 0, 'SLpM': 0.0, 'Str_Def': 0}
+        return {'Name': fighter_name, 'Wins': 0, 'Losses': 0, 'Draws': 0, 'SLpM': 0.0, 'Str_Def': 0}, []
 
     soup = BeautifulSoup(response.text, 'html.parser')
+    stats_dict = {}
+    opponent_history = [] # List to store (result, opponent_name) tuples
 
     try:
         # --- Get Record (Wins, Losses, Draws) ---
@@ -107,13 +110,13 @@ def get_stats_from_profile(profile_url, fighter_name):
         record_text = record_span.get_text(strip=True).replace('Record: ', '')
         # Split the record "27-1-0" or "11-3-0 (1 NC)" into parts
         parts = record_text.split('-')
-        wins = int(parts[0])
-        losses = int(parts[1])
+        stats_dict['Wins'] = int(parts[0])
+        stats_dict['Losses'] = int(parts[1])
         
         # --- MODIFIED: Handle "No Contests" in record, e.g., "0 (1 NC)" ---
         # We split the 'draws' part by a space and take the first element
         draws_string = parts[2].split(' ')[0]
-        draws = int(draws_string)
+        stats_dict['Draws'] = int(draws_string)
         # --- END MODIFICATION ---
 
         # --- Get Striking Stats ---
@@ -141,23 +144,45 @@ def get_stats_from_profile(profile_url, fighter_name):
                     str_def = int(str_def_text)
                 # else, str_def remains 0
         
+        stats_dict['SLpM'] = slpm
+        stats_dict['Str_Def'] = str_def
+        stats_dict['Name'] = fighter_name
+        
         if slpm == 0.0:
             print(f"Warning: Could not parse SLpM for {fighter_name}.")
         if str_def == 0:
             print(f"Warning: Could not parse Str. Def for {fighter_name}.")
 
-        return {
-            'Name': fighter_name,
-            'Wins': wins,
-            'Losses': losses,
-            'Draws': draws,
-            'SLpM': slpm,
-            'Str_Def': str_def
-        }
+        # --- NEW: Get Opponent History ---
+        # Find the fight history table
+        fight_table = soup.find('table', class_='b-fight-details__table')
+        if fight_table:
+            table_body = fight_table.find('tbody')
+            if table_body:
+                rows = table_body.find_all('tr', class_='b-fight-details__table-row')
+                
+                for row in rows:
+                    cols = row.find_all('td')
+                    if len(cols) > 1: # Make sure it's a valid row
+                        # Get result: 'win', 'loss', 'draw', 'nc'
+                        result_text = cols[0].find('p').get_text(strip=True).lower()
+                        
+                        # Get opponent name
+                        # The opponent is the *second* <a> tag in the second column
+                        opponent_links = cols[1].find_all('a')
+                        if len(opponent_links) > 1:
+                            opponent_name = opponent_links[1].get_text(strip=True).lower()
+                            
+                            # We only care about wins, losses, or draws
+                            if result_text in ['win', 'loss', 'draw']:
+                                opponent_history.append((result_text, opponent_name))
 
     except Exception as e:
         print(f"Error parsing stats for {fighter_name}: {e}. Using default stats.")
-        return {'Name': fighter_name, 'Wins': 0, 'Losses': 0, 'Draws': 0, 'SLpM': 0.0, 'Str_Def': 0}
+        # Return default stats and empty history
+        return {'Name': fighter_name, 'Wins': 0, 'Losses': 0, 'Draws': 0, 'SLpM': 0.0, 'Str_Def': 0}, []
+
+    return stats_dict, opponent_history
 
 
 # --- 2. Main Program Logic ---
@@ -176,11 +201,11 @@ def main():
     # --- Get data from the web ---
     f1_url = get_fighter_profile_url(fighter1_name)
     # Pass the original, user-typed name (cleaned up) to get_stats_from_profile
-    fighter1_data = get_stats_from_profile(f1_url, fighter1_name.strip().title())
+    fighter1_data, f1_opp_history = get_stats_from_profile(f1_url, fighter1_name.strip().title())
     
     f2_url = get_fighter_profile_url(fighter2_name)
     # Pass the original, user-typed name (cleaned up) to get_stats_from_profile
-    fighter2_data = get_stats_from_profile(f2_url, fighter2_name.strip().title())
+    fighter2_data, f2_opp_history = get_stats_from_profile(f2_url, fighter2_name.strip().title())
     print("--- Scraping Complete ---\n")
 
     # Use the 'Name' from the data we received
@@ -207,6 +232,48 @@ def main():
     f1_effective_strikes = f1_slpm * (1 - f2_def)
     f2_effective_strikes = f2_slpm * (1 - f1_def)
 
+    # --- NEW: Common Opponent Logic ---
+    # Create dictionaries for easier lookup: {'opponent_name': 'result'}
+    # We only take the *first* result (most recent fight) if they fought multiple times
+    f1_opp_dict = {name: result for result, name in reversed(f1_opp_history)}
+    f2_opp_dict = {name: result for result, name in reversed(f2_opp_history)}
+
+    # Find the set of common opponents
+    common_opponents = set(f1_opp_dict.keys()) & set(f2_opp_dict.keys())
+
+    f1_common_score = 0
+    f2_common_score = 0
+    common_opp_report = [] # To print out
+
+    for opp in common_opponents:
+        f1_result = f1_opp_dict[opp]
+        f2_result = f2_opp_dict[opp]
+        
+        opp_name_clean = opp.title()
+        report_str = f"  - Common Opponent: {opp_name_clean}"
+        
+        if f1_result == 'win' and f2_result == 'loss':
+            f1_common_score += 1
+            report_str += f" ({fighter1_name} WON, {fighter2_name} LOST)"
+        elif f1_result == 'loss' and f2_result == 'win':
+            f2_common_score += 1
+            report_str += f" ({fighter1_name} LOST, {fighter2_name} WON)"
+        else:
+            # Both won, both lost, or one was a draw
+            report_str += f" (Both {f1_result})"
+        common_opp_report.append(report_str)
+
+    # Create a ratio for the common opponent score
+    total_common_score = f1_common_score + f2_common_score
+    if total_common_score == 0:
+        f1_common_ratio = 0.5  # If no score, it's a 50/50 split
+        f2_common_ratio = 0.5
+    else:
+        f1_common_ratio = f1_common_score / total_common_score
+        f2_common_ratio = f2_common_score / total_common_score
+    
+    # --- END: Common Opponent Logic ---
+
     # Weighted Prediction Score
     f1_win_rate = df.loc[0, 'Win_Rate']
     f2_win_rate = df.loc[1, 'Win_Rate']
@@ -219,11 +286,18 @@ def main():
         f1_strike_ratio = f1_effective_strikes / total_effective_strikes
         f2_strike_ratio = f2_effective_strikes / total_effective_strikes
 
-    weight_win_rate = 0.6
-    weight_striking = 0.4
+    # --- MODIFIED: Adjusted weights for 3 factors ---
+    weight_win_rate = 0.5     # 50%
+    weight_striking = 0.3     # 30%
+    weight_common_opp = 0.2   # 20%
 
-    f1_prediction_score = (f1_win_rate * weight_win_rate) + (f1_strike_ratio * 100 * weight_striking)
-    f2_prediction_score = (f2_win_rate * weight_win_rate) + (f2_strike_ratio * 100 * weight_striking)
+    f1_prediction_score = (f1_win_rate * weight_win_rate) + \
+                          (f1_strike_ratio * 100 * weight_striking) + \
+                          (f1_common_ratio * 100 * weight_common_opp)
+                              
+    f2_prediction_score = (f2_win_rate * weight_win_rate) + \
+                          (f2_strike_ratio * 100 * weight_striking) + \
+                          (f2_common_ratio * 100 * weight_common_opp)
 
     total_score = f1_prediction_score + f2_prediction_score
     if total_score == 0:
@@ -264,6 +338,14 @@ def main():
     print_columns = ['Name', 'Wins', 'Losses', 'Draws', 'Win_Rate', 'SLpM', 'Str_Def']
     print(df[print_columns].to_string(index=False))
     print("\n-------------------------------------------------------------")
+    
+    # --- NEW: Print common opponent report ---
+    if common_opp_report:
+        print("Common Opponent Analysis:")
+        for line in common_opp_report:
+            print(line)
+        print("-------------------------------------------------------------")
+    
     print(f"Effective Strikes: {fighter1_name} = {f1_effective_strikes:.2f}, {fighter2_name} = {f2_effective_strikes:.2f}")
     print(f"Prediction Likelihood: {fighter1_name} = {f1_likelihood}%, {fighter2_name} = {f2_likelihood}%")
     print("-------------------------------------------------------------")
@@ -287,6 +369,7 @@ if __name__ == "__main__":
         sys.exit(1) # Exit the script
         
     main()
+
 
 
 
